@@ -2846,9 +2846,10 @@ Error RenderingDeviceDriverVulkan::command_queue_execute_and_present(CommandQueu
 
 		device_queue.submit_mutex.unlock();
 
-		// Low-latency: Increment frame counter after present
+		// Low-latency: Update frame timing statistics for adaptive pacing.
 		if (err == VK_SUCCESS && low_latency_manager.is_enabled()) {
-			// Measure actual frame duration from begin_frame() to now
+			// Measure actual frame duration from begin_frame() to present completion.
+			// This feeds the EWMA predictor for CPU-based frame pacing.
 			auto frame_end_time = std::chrono::high_resolution_clock::now();
 			auto frame_duration = std::chrono::duration_cast<std::chrono::microseconds>(
 				frame_end_time - low_latency_manager.get_frame_start_time()
