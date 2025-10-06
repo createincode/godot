@@ -1586,6 +1586,14 @@ Error RenderingDeviceDriverVulkan::initialize(uint32_t p_device_index, uint32_t 
 
 	shader_container_format.set_debug_info_enabled(Engine::get_singleton()->is_generate_spirv_debug_info_enabled());
 
+	// Initialize low-latency rendering manager.
+	bool low_latency_enabled = GLOBAL_GET("rendering/driver/low_latency_mode");
+	print_verbose(vformat("Low-latency mode setting: %s", low_latency_enabled ? "enabled" : "disabled"));
+
+	low_latency_manager.set_enabled(low_latency_enabled);
+	const RenderingContextDriverVulkan::Functions &functions = context_driver->functions_get();
+	low_latency_manager.initialize(vk_device, physical_device, &functions);
+
 	return OK;
 }
 
@@ -2681,6 +2689,9 @@ RDD::CommandQueueID RenderingDeviceDriverVulkan::command_queue_create(CommandQue
 Error RenderingDeviceDriverVulkan::command_queue_execute_and_present(CommandQueueID p_cmd_queue, VectorView<SemaphoreID> p_wait_semaphores, VectorView<CommandBufferID> p_cmd_buffers, VectorView<SemaphoreID> p_cmd_semaphores, FenceID p_cmd_fence, VectorView<SwapChainID> p_swap_chains) {
 	DEV_ASSERT(p_cmd_queue.id != 0);
 
+	// Low-latency: Wait for previous frames if needed (paces CPU to not run ahead of GPU)
+	low_latency_manager.begin_frame();
+
 	VkResult err;
 	CommandQueue *command_queue = (CommandQueue *)(p_cmd_queue.id);
 	Queue &device_queue = queue_families[command_queue->queue_family][command_queue->queue_index];
@@ -2741,6 +2752,34 @@ Error RenderingDeviceDriverVulkan::command_queue_execute_and_present(CommandQueu
 		submit_info.pCommandBuffers = command_buffers.ptr();
 		submit_info.signalSemaphoreCount = signal_semaphores.size();
 		submit_info.pSignalSemaphores = signal_semaphores.ptr();
+
+		// Low-latency: Add timeline semaphore signaling if using that method
+		VkTimelineSemaphoreSubmitInfo timeline_info = {};
+		uint64_t timeline_signal_value = 0;
+		if (low_latency_manager.is_enabled() &&
+		    low_latency_manager.get_active_method() == VulkanLowLatency::METHOD_TIMELINE_SEMAPHORE &&
+		    low_latency_manager.get_timeline_semaphore() != VK_NULL_HANDLE) {
+
+			timeline_signal_value = low_latency_manager.get_frame_counter();
+
+			timeline_info.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+			// When mixing binary and timeline semaphores, must provide values for ALL
+	// Binary semaphores ignore value (use 0), timeline uses counter
+	LocalVector<uint64_t> timeline_signal_values;
+	for (uint32_t i = 0; i < signal_semaphores.size(); i++) {
+		timeline_signal_values.push_back(0);  // Binary semaphores
+	}
+	timeline_signal_values.push_back(timeline_signal_value);  // Timeline semaphore (added next)
+
+	timeline_info.signalSemaphoreValueCount = timeline_signal_values.size();
+			timeline_info.pSignalSemaphoreValues = timeline_signal_values.ptr();
+
+			// Add timeline semaphore to signal list
+			signal_semaphores.push_back(low_latency_manager.get_timeline_semaphore());
+			submit_info.signalSemaphoreCount = signal_semaphores.size();
+			submit_info.pSignalSemaphores = signal_semaphores.ptr();
+			submit_info.pNext = &timeline_info;
+		}
 
 		device_queue.submit_mutex.lock();
 		err = vkQueueSubmit(device_queue.queue, 1, &submit_info, vk_fence);
@@ -2806,6 +2845,17 @@ Error RenderingDeviceDriverVulkan::command_queue_execute_and_present(CommandQueu
 #endif
 
 		device_queue.submit_mutex.unlock();
+
+		// Low-latency: Increment frame counter after present
+		if (err == VK_SUCCESS && low_latency_manager.is_enabled()) {
+			// Measure actual frame duration from begin_frame() to now
+			auto frame_end_time = std::chrono::high_resolution_clock::now();
+			auto frame_duration = std::chrono::duration_cast<std::chrono::microseconds>(
+				frame_end_time - low_latency_manager.get_frame_start_time()
+			);
+			low_latency_manager.update_frame_timing(frame_duration.count());
+			low_latency_manager.increment_frame_counter();
+		}
 
 		// Set the index to an invalid value. If any of the swap chains returned out of date, indicate it should be resized the next time it's acquired.
 		bool any_result_is_out_of_date = false;
@@ -3229,6 +3279,12 @@ Error RenderingDeviceDriverVulkan::swap_chain_resize(CommandQueueID p_cmd_queue,
 	if (surface_capabilities.maxImageCount > 0) {
 		// Only clamp to the max image count if it's defined. A max image count of 0 means there's no upper limit to the amount of images.
 		desired_swapchain_images = MIN(desired_swapchain_images, surface_capabilities.maxImageCount);
+	}
+
+	// Override for low-latency mode: minimize buffering while respecting hardware limits.
+	if (low_latency_manager.is_enabled() && desired_swapchain_images > surface_capabilities.minImageCount) {
+		desired_swapchain_images = surface_capabilities.minImageCount;
+		print_verbose(vformat("Low-latency mode: reducing to minimum swapchain images = %d", desired_swapchain_images));
 	}
 
 	// Refer to the comment in command_queue_present() for more details.
@@ -5997,6 +6053,9 @@ RenderingDeviceDriverVulkan::~RenderingDeviceDriverVulkan() {
 			}
 		}
 	}
+
+	// Cleanup low-latency resources
+	low_latency_manager.cleanup(vk_device);
 
 	if (vk_device != VK_NULL_HANDLE) {
 		vkDestroyDevice(vk_device, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_DEVICE));

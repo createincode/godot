@@ -634,6 +634,7 @@ void Main::print_help(const char *p_binary) {
 	print_help_option("--gpu-abort", "Abort on graphics API usage errors (usually validation layer errors). May help see the problem if your system freezes.\n", CLI_OPTION_AVAILABILITY_TEMPLATE_DEBUG);
 #endif
 	print_help_option("--generate-spirv-debug-info", "Generate SPIR-V debug information. This allows source-level shader debugging with RenderDoc.\n");
+	print_help_option("--low-latency-mode <on|off>", "Enable or disable low-latency rendering mode to reduce input-to-photon delay (Vulkan only).\n");
 #if defined(DEBUG_ENABLED) || defined(DEV_ENABLED)
 	print_help_option("--extra-gpu-memory-tracking", "Enables additional memory tracking (see class reference for `RenderingDevice.get_driver_and_device_memory_report()` and linked methods). Currently only implemented for Vulkan. Enabling this feature may cause crashes on some systems due to buggy drivers or bugs in the Vulkan Loader. See https://github.com/godotengine/godot/issues/95967\n");
 	print_help_option("--accurate-breadcrumbs", "Force barriers between breadcrumbs. Useful for narrowing down a command causing GPU resets. Currently only implemented for Vulkan.\n");
@@ -1267,6 +1268,16 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 #endif
 		} else if (arg == "--generate-spirv-debug-info") {
 			Engine::singleton->generate_spirv_debug_info = true;
+		} else if (arg == "--low-latency-mode") {
+			if (N) {
+				String value = N->get().to_lower();
+				bool enable = (value == "on" || value == "true" || value == "1");
+				ProjectSettings::get_singleton()->set_setting("rendering/driver/low_latency_mode", enable);
+				N = N->next();
+			} else {
+				OS::get_singleton()->print("Missing low-latency mode argument, aborting.\n");
+				goto error;
+			}
 #if defined(DEBUG_ENABLED) || defined(DEV_ENABLED)
 		} else if (arg == "--extra-gpu-memory-tracking") {
 			Engine::singleton->extra_gpu_memory_tracking = true;
@@ -2205,6 +2216,9 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 		GLOBAL_DEF_RST("rendering/rendering_device/fallback_to_d3d12", true);
 		GLOBAL_DEF_RST("rendering/rendering_device/fallback_to_opengl3", true);
 	}
+
+	// Low-latency rendering mode.
+	GLOBAL_DEF_RST("rendering/driver/low_latency_mode", false);
 
 	{
 		// GL Compatibility driver overrides per platform.

@@ -34,6 +34,7 @@
 #include "core/templates/paged_allocator.h"
 #include "drivers/vulkan/rendering_context_driver_vulkan.h"
 #include "drivers/vulkan/rendering_shader_container_vulkan.h"
+#include "drivers/vulkan/vulkan_low_latency.h"
 #include "servers/rendering/rendering_device_driver.h"
 
 #ifdef DEBUG_ENABLED
@@ -117,6 +118,7 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 	RenderingContextDriver::Device context_device = {};
 	uint32_t frame_count = 1;
 	VkPhysicalDevice physical_device = VK_NULL_HANDLE;
+	VulkanLowLatency low_latency_manager;
 	VkPhysicalDeviceProperties physical_device_properties = {};
 	VkPhysicalDeviceFeatures physical_device_features = {};
 	VkPhysicalDeviceFeatures requested_device_features = {};
@@ -163,6 +165,7 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 
 public:
 	Error initialize(uint32_t p_device_index, uint32_t p_frame_count) override final;
+	VulkanLowLatency *get_low_latency_manager() { return &low_latency_manager; }
 
 private:
 	/****************/
